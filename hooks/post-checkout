@@ -47,8 +47,10 @@ find_script() {
     # 3. Repo root
     [ -f "$REPO_DIR/update-team-knowledge.sh" ] && echo "$REPO_DIR/update-team-knowledge.sh" && return 0
 
-    # 4. Global install
-    [ -f "$HOME/.claude/scripts/update-team-knowledge.sh" ] && echo "$HOME/.claude/scripts/update-team-knowledge.sh" && return 0
+    # 4. Global install (check all agent script directories)
+    for agent_dir in "$HOME/.claude" "$HOME/.cursor" "$HOME/.codex" "$HOME/.gemini" "$HOME/.opencode"; do
+        [ -f "$agent_dir/scripts/update-team-knowledge.sh" ] && echo "$agent_dir/scripts/update-team-knowledge.sh" && return 0
+    done
 
     return 1
 }

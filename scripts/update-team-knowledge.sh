@@ -16,6 +16,8 @@
 #   STATE_FILE      — Path to state file (default: next to KNOWLEDGE_FILE)
 #   BASE_BRANCH     — Main branch name (default: auto-detect dev/main/master)
 #   PROJECT_NAME    — Project name for logs (default: repo directory name)
+#   AGENT_CLI       — Which agent CLI to use (default: auto-detect)
+#                     Options: auto, claude, cursor, codex, gemini, opencode
 #
 # Usage:
 #   bash update-team-knowledge.sh [--force] [--dry-run]
@@ -107,6 +109,55 @@ if [ -z "${BASE_BRANCH:-}" ]; then
     BASE_BRANCH="${BASE_BRANCH:-main}"
 fi
 
+# --- Resolve agent CLI ---
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DETECT_SCRIPT="$SCRIPT_DIR/detect-agents.sh"
+
+# Source agent detection
+if [ -f "$DETECT_SCRIPT" ]; then
+    eval "$("$DETECT_SCRIPT")"
+else
+    # Inline fallback: try each agent in priority order
+    AVAILABLE_AGENTS=""
+    DEFAULT_AGENT=""
+    for _agent_name in claude codex gemini cursor opencode; do
+        _cli_name="$_agent_name"
+        [ "$_agent_name" = "cursor" ] && _cli_name="agent"
+        if command -v "$_cli_name" &>/dev/null; then
+            AVAILABLE_AGENTS="${AVAILABLE_AGENTS:+$AVAILABLE_AGENTS }$_agent_name"
+            [ -z "$DEFAULT_AGENT" ] && DEFAULT_AGENT="$_agent_name"
+        fi
+    done
+fi
+
+resolve_agent() {
+    local preference="${AGENT_CLI:-auto}"
+
+    if [ "$preference" != "auto" ]; then
+        # User explicitly chose an agent — verify it's available
+        case "$preference" in
+            claude)  command -v claude &>/dev/null || die "Requested agent 'claude' not found. Available: $AVAILABLE_AGENTS" ;;
+            cursor)  command -v agent &>/dev/null  || die "Requested agent 'cursor' (agent CLI) not found. Available: $AVAILABLE_AGENTS" ;;
+            codex)   command -v codex &>/dev/null  || die "Requested agent 'codex' not found. Available: $AVAILABLE_AGENTS" ;;
+            gemini)  command -v gemini &>/dev/null || die "Requested agent 'gemini' not found. Available: $AVAILABLE_AGENTS" ;;
+            opencode) command -v opencode &>/dev/null || die "Requested agent 'opencode' not found. Available: $AVAILABLE_AGENTS" ;;
+            *)       die "Unknown agent: $preference. Options: auto, claude, cursor, codex, gemini, opencode" ;;
+        esac
+        RESOLVED_AGENT="$preference"
+        return 0
+    fi
+
+    # Auto-detect: use first available in priority order
+    if [ -n "${DEFAULT_AGENT:-}" ]; then
+        RESOLVED_AGENT="$DEFAULT_AGENT"
+        return 0
+    fi
+
+    die "No AI coding agent CLI found. Install one of: claude, cursor (agent CLI), codex, gemini, opencode"
+}
+
+resolve_agent
+
 # --- Log resolved config ---
 log "=== Configuration ==="
 log "  PROJECT_NAME:   $PROJECT_NAME"
@@ -114,9 +165,7 @@ log "  REPO_DIR:       $REPO_DIR"
 log "  KNOWLEDGE_FILE: $KNOWLEDGE_FILE"
 log "  STATE_FILE:     $STATE_FILE"
 log "  BASE_BRANCH:    $BASE_BRANCH"
-
-# --- Preconditions ---
-command -v claude &>/dev/null || die "claude CLI not in PATH"
+log "  AGENT_CLI:      $RESOLVED_AGENT (available: $AVAILABLE_AGENTS)"
 
 # --- Read state ---
 LAST_COMMIT=""
@@ -252,16 +301,11 @@ if [ "$DRY_RUN" = true ]; then
     exit 0
 fi
 
-# --- Call agent with compact context ---
-log "Calling claude CLI to update TEAM-KNOWLEDGE.md..."
-
+# --- Build the agent prompt ---
 SUMMARY_CONTENT=$(cat "$SUMMARY_FILE")
-
-# Build the agent prompt dynamically based on resolved config
 KNOWLEDGE_BASENAME=$(basename "$KNOWLEDGE_FILE")
 
-env -u CLAUDECODE claude --print --dangerously-skip-permissions \
-    "You are updating a team knowledge base file used by LLMs assisting developers on a multi-contributor project.
+AGENT_PROMPT="You are updating a team knowledge base file used by LLMs assisting developers on a multi-contributor project.
 
 FILE: $KNOWLEDGE_FILE
 
@@ -304,8 +348,41 @@ INSTRUCTIONS:
 CHANGE SUMMARY:
 $SUMMARY_CONTENT
 
-UPDATE THE 'Last updated' DATE TO: $(date '+%Y-%m-%d')" \
-    >> "$LOG_FILE" 2>&1
+UPDATE THE 'Last updated' DATE TO: $(date '+%Y-%m-%d')"
+
+# --- Call agent with multi-agent dispatch ---
+call_agent() {
+    local prompt="$1"
+
+    case "$RESOLVED_AGENT" in
+        claude)
+            env -u CLAUDECODE claude -p --dangerously-skip-permissions "$prompt"
+            ;;
+        cursor)
+            timeout 1200 agent -p --force --workspace "$REPO_DIR" "$prompt"
+            ;;
+        codex)
+            cd "$REPO_DIR"
+            codex exec --full-auto --cd "$REPO_DIR" "$prompt"
+            ;;
+        gemini)
+            cd "$REPO_DIR"
+            gemini -p --yolo "$prompt"
+            ;;
+        opencode)
+            log "WARNING: OpenCode headless mode is experimental."
+            cd "$REPO_DIR"
+            opencode "$prompt"
+            ;;
+        *)
+            die "Unknown agent: $RESOLVED_AGENT"
+            ;;
+    esac
+}
+
+log "Calling $RESOLVED_AGENT CLI to update TEAM-KNOWLEDGE.md..."
+
+call_agent "$AGENT_PROMPT" >> "$LOG_FILE" 2>&1
 
 AGENT_EXIT=$?
 
