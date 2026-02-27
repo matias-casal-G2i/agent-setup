@@ -1,1 +1,0 @@
-../../agents/claude/skills/team-knowledge/SKILL.md
